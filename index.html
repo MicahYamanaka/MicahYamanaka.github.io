@@ -1,0 +1,201 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN"
+	"http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+
+<meta property="og:image" content="heat_final.png" />
+
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head>
+	<meta http-equiv="Content-Type" content="text/html; charset=utf-8"/>
+
+	<title>Data for Data</title>
+	
+	<style type="text/css" media="screen">
+	
+		body {
+			line-height: 140%;
+			margin: auto;
+			width: 800px;
+		}
+		code {font-size: 120%;}
+		
+		
+		pre code {
+			background-color: #00bfb2;
+			color: #000000;
+			
+			display: block;
+			padding: 20px;
+		}
+		
+		.centered {
+			position: fixed;
+			top: 50%;
+			left: 50%;
+			transform: translate(-50%, -50%);
+}
+		
+	</style>
+	
+</head>
+
+<body bgcolor="000000" text="00bfb2">
+
+<style>
+ body {
+        counter-reset: h1counter;
+    }
+    h1 {
+        counter-reset: h2counter;
+    }
+    h2 {
+        counter-reset: h3counter;
+    }
+    h2:before {
+        content: counter(h2counter) ".\0000a0\0000a0";
+        counter-increment: h2counter;
+    }
+    h3:before {
+        content: counter(h2counter) "." counter(h3counter) ".\0000a0\0000a0";
+        counter-increment: h3counter;
+    }
+</style>
+	
+<h1 id="preamble">Data Structures for Data Analysis for Data Visualization</h1>
+
+<p>I wanted to analyze data on election donations in the 2016 and 2020 presidential cycles to find how donors shifted between candidates in those two cycles. To do so, I looked at all cases in which there was a maximum individual donation under the same name in 2016 and 2020 and then plotting them in a heatmap.</p>
+
+<center>
+  <pre><code><img src="heat_final.png" height=640px></pre></code>
+</center>
+
+<h2 >The Data</h2>
+
+I drew from FEC individual contributions. You can look at the data for yourself:
+
+<ul>
+  <li><a href="https://www.fec.gov/data/receipts/individual-contributions/?two_year_transaction_period=2016&recipient_committee_type=P&min_amount=2700&max_amount=2700">2016 cycle</a></li>
+  <li><a href="https://www.fec.gov/data/receipts/individual-contributions/?two_year_transaction_period=2020&recipient_committee_type=P&min_amount=2800&max_amount=2800">2020 cycle</a></li>
+</ul>
+
+This should be static, but was retrieved on 19 April 2022. The originals are retained under version control. As the files are too large to be stored on Github, they are uploaded in parts with the split/combine script also provided. You can also run on partial data, which generally appeared to be representative.
+
+I found the csv lines to be extremely low in information density, and over time refined a line reader that I would use when reading lines into an internal data structure.
+
+<pre><code># get key, value from line
+def get_kv(l):
+	# we need the 13th column but quotes mix it up
+	key, val, commas, quotes = "", "", 0, False
+	for c in l:
+		if c == '\"':
+			quotes = not quotes
+		elif c == ',' and not quotes:
+			commas += 1
+		elif commas == 13:
+			key += c
+		elif commas == 1 and (c.isupper() or c.isspace()):
+			val += c
+		elif commas == 14:
+			# shorten val
+			for f in ["FOR","PRES","AMER"]:
+				if f in val:
+					val = val[:val.find("FOR")]
+			for r in ["FRIENDS OF","COMMITTEE","TO ELECT","INC","CAMPAIGN"]:
+				val = val.replace(r,"")
+			val.strip()
+			return key, val</code></pre>
+			
+I did learn something here, which is that it would probably help transparency a lot if the names of donees had to match the names of the candidates on behalf of whom they collect donations.
+
+<h2 >The Structure</h2>
+
+<p>The data set was approximately 100 megabytes in size encoded as a .csv files. I read the files line by line in a binary search tree that stored the donor name as a key value and then stored as values the donee in two sets, one for 2016 and one for 2020. I used get_kv as my function to read lines.</p>
+
+<p>This is where you would use the library of the week if you wanted to use a library.</p>
+
+<pre><code># a bst is a list - less, more, key, vals
+# key is a donor
+# vals is a year indexed list of sets of donees
+
+# file line to bst entry
+def insert(data, tree, func, year):
+	# use func to read a line of data from file
+	key, val = func(data)
+	# traverse
+	while tree and key != tree[2]:
+		tree = tree[key > tree[2]]
+	if tree:
+	# add value to key
+		tree[3][year].add(val)
+	elif not year:
+	# add key to tree
+		tree.extend([[],[], key, [{val},set()]])</code></pre>
+		
+<p>I stored the subtrees first to allow for boolean indexing and separated donees by year to track cycle-to-cycle changes. I had not original planned to track multiple donees per year, but when working over the data found it to be quite common for a donor to donate to multiple donees per cycle and wanted to capture this phenomenon.</p>
+
+<p>I did need to be able to flatten the tree back into a list, so I used a simple recursive utility to do so.</p>
+
+<pre><code>def tolist(tree):
+	if tree:
+		# we have a two sets and want to add all pairs between sets
+		l = [(one, two) for one in tree[3][0] for two in tree[3][1]]
+		return tolist(tree[0]) + l + tolist(tree[1])
+	return []</pre></code>
+
+<p>Here I swapped from lists to tuples for internal data as I would be adding these all to dictionaries shortly which would latter be converted to dataframes for the heatmap. Since lists cannot be hashed and therefore cannot be added to dictionaries, but these internal data will no longer be altered, this was the first use of an appropriate Python type other than a list to store data.</p>
+
+<h2 >The Analysis</h2>
+
+To look over the data I thought it best to translate to a dictionary in two dimensions indexed by donees capturing donor frequency for the donee pair. To see how many Trump->Biden donors for example I would then check <code>d["TRUMP"]["BIDEN"]</code>. So in all, this code goes csv->bst->list->dictionary. I found I also had to take the log of the log of the frequencies using <code>bit_length</code> because of strong herding effects around winning nominees making movement between primary candidates almost immeasurably small, especially at the point of visualization.
+
+<pre><code># csv -> bst
+csvs = ["2016_2700s.csv","2020_2800s.csv"]
+tree = []
+[insert(line, tree, get_kv, n) for n in [0,1] for line in open(csvs[n],"r")]
+
+# bst -> list
+dnrs = [donr for donr in tolist(tree) if all(donr)] # ensure donations both cycles
+
+# list -> dict
+sxtn, twnt = set([donr[0] for donr in dnrs]), set([donr[1] for donr in dnrs])
+d = { s : { t : 0 for t in twnt } for s in sxtn } # init to zero
+for donr in dnrs:
+d[donr[0]][donr[1]] += 1 # compute frequencies 
+
+# frequency -> log of log of frequency
+d = { s : { t : d[s][t].bit_length().bit_length() for t in twnt } for s in sxtn }</pre></code>
+
+<h2 >The Visualization</h2>
+
+I don't really know how Seaborn works, so I just ran it with default settings and looked up things that annoyed me. I wanted a transparent background and nice color theme in the graph to display with the website HTML theme, had to make it high resolution so I could read the (many) labels, and copied a script from Stack Overflow that manipulated tick marks to move labels from the bottom to the top of the x axis. Otherwise, I simply ran a heatmap over the dictionary and presented what I found!
+
+<pre><code>import pandas
+import seaborn
+import matplotlib.pyplot as plt
+
+df = pandas.DataFrame.from_dict(getd())
+
+plt.rcParams['figure.figsize'] = [10, 10]
+plt.rcParams['figure.dpi'] = 100
+plt.tick_params(axis='both', which='major', labelsize=10, labelbottom = False, 
+                bottom=False, top = False, left = False, labeltop=True)
+plt.style.use("dark_background")
+
+p = seaborn.heatmap(df, cmap=seaborn.color_palette("mako", as_cmap=True))
+p.get_figure().savefig("heat_final.png",bbox_inches='tight',transparent=True)</pre></code>
+
+I'm pleased with how it turned out, and offer a few thoughts.
+
+<ul>
+  <li>I was wondering who donated to Amy Klobuchar. I wish her name were listed, and I'm pretty sure she's Amy, but think transparency could be improved in this reporting.</li>
+  <li>WIN THE ERA is particularly egregious, and apparently associated with Pete Buttigieg.</li>
+  <li>Amy's non-Hillary donors seem to mostly be from Kasich and Donald J Trump.</li>
+</ul>
+
+It would be interesting to look at relative rather than absolute donor counts, and look at dollars rather than maximum individual donors, and do some comparison between parties, but I'm happy with how my graph turned out!
+
+<center>
+  <pre><code><img src="heat_final.png" height=640px></pre></code>
+</center>
+
+</body>
+</html>
